@@ -1,0 +1,30 @@
+[
+  {
+    "id": 1,
+    "title": "New task",
+    "done": true,
+    "CreatedAt": "2026-08-29T13:22:45.1899874+05:30",
+    "CompletedAt": "2026-08-29T13:23:22.1788637+05:30"
+  },
+  {
+    "id": 2,
+    "title": "wake up early",
+    "done": false,
+    "CreatedAt": "2026-08-29T13:26:25.5477357+05:30",
+    "CompletedAt": null
+  },
+  {
+    "id": 3,
+    "title": "do the assignments",
+    "done": false,
+    "CreatedAt": "2026-08-29T13:26:33.7248091+05:30",
+    "CompletedAt": null
+  },
+  {
+    "id": 4,
+    "title": "finish the project",
+    "done": false,
+    "CreatedAt": "2026-08-29T13:26:45.2861292+05:30",
+    "CompletedAt": null
+  }
+]
