@@ -1,0 +1,7 @@
+{"time":"2026-08-30T02:15:26.4935257+05:30","level":"INFO","msg":"server starting","addr":"127.0.0.1:8080"}
+{"time":"2026-08-30T02:15:48.6211389+05:30","level":"INFO","msg":"PING HIT"}
+{"time":"2026-08-30T02:15:48.6211389+05:30","level":"INFO","msg":"http request","method":"GET","path":"/ping","remote_addr":"127.0.0.1:52652","duration":0}
+{"time":"2026-08-30T02:15:55.8683622+05:30","level":"INFO","msg":"PING HIT"}
+{"time":"2026-08-30T02:15:55.8683622+05:30","level":"INFO","msg":"http request","method":"GET","path":"/ping","remote_addr":"127.0.0.1:52652","duration":0}
+{"time":"2026-08-30T02:16:10.7826214+05:30","level":"INFO","msg":"PING HIT"}
+{"time":"2026-08-30T02:16:10.7826214+05:30","level":"INFO","msg":"http request","method":"GET","path":"/ping","remote_addr":"127.0.0.1:52652","duration":0}
