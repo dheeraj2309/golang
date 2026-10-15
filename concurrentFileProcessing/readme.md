@@ -68,6 +68,19 @@ Channels are basically piplines , designed to carry only one type of datatype, a
  line := <-jobs // A Worker takes the string off the belt
  ```
 
+ ### Types of Channels
+To understand the different types, you just need to look at whether the tube has a storage area, and which way the items are allowed to flow.
+
+Types by Storage (Buffering):
+* **Unbuffered Channels (No Storage)**: Imagine passing a baton in a relay race. The sender holds out the baton and must freeze in place until the receiver physically grabs it. There is no table to set the baton down on. Both workers must meet at the exact same moment for the handoff.
+* **Buffered Channels (Has a Waiting Area)**: Imagine a neighborhood mailbox that holds exactly 10 letters. You drop your letter in and immediately walk away. You only get stuck waiting if the mailbox is completely stuffed full. The mail carrier grabs the letters whenever they want, and only gets stuck waiting if the box is totally empty.
+
+Types by Direction (Function Permissions)
+When you hand a channel to a specific worker (a function), you can restrict their permissions so they don't accidentally misuse it.
+* **Bidirectional (`chan`)**: A two-way walkie-talkie. The worker can both speak into it (send) and listen from it (receive).
+* **Send-Only (`chan<-`)**: A mail slot on a locked door. The worker can push letters in, but they cannot reach their hand back through the slot to read what's inside.
+* **Receive-Only (`<-chan`)**: An airport luggage carousel. The worker stands there and grabs bags as they come out. They are not allowed to throw their own bags onto the belt.
+
 ## Concurrent File/log Processing
 This project aims to create a pipeline capable enough to ingest large files, parses it to extract meaningful info and make analytics report
 Constraint: It must process gigabytes of data in seconds while keeping memory usage completely flat and maximizing all CPU cores.
