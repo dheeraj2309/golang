@@ -121,7 +121,31 @@ Stage 3: The Collector (Fan-In)
 #### Synchronization
 The hardest part of a concurrent pipeline is shutting it down cleanly without leaving "zombie" Goroutines trapped in infinite waiting loops. We manage this through a precise chain reaction:
 
-- **The EOF Trigger**: The Producer finishes reading the last line of the file and immediately calls close(jobs).
-- **The Worker Drain**: The workers finish parsing whatever lines are currently sitting on the conveyor belt. Once empty, their channel-reading loops automatically break. As each worker clocks out, they decrement a central coordination counter (a sync.WaitGroup).
-- **The Bridge**: A separate, invisible monitor Goroutine does nothing but watch that WaitGroup. The exact millisecond the last worker clocks out, this monitor calls close(results).
+- **The EOF Trigger**: The Producer finishes reading the last line of the file and immediately calls `close(jobs)`.
+- **The Worker Drain**: The workers finish parsing whatever lines are currently sitting on the conveyor belt. Once empty, their channel-reading loops automatically break. As each worker clocks out, they decrement a central coordination counter (a `sync.WaitGroup`).
+- **The Bridge**: A separate, invisible monitor Goroutine does nothing but watch that WaitGroup. The exact millisecond the last worker clocks out, this monitor calls `close(results)`.
 - **The Final Tally**: The Collector realizes the results channel is closed, prints the final analytics report to your terminal, and the program exits cleanly in under a second.
+
+
+## What is `sync.WaitGroup` ?
+When your `main()` function reaches its final line of code, it instantly terminates the program. It does not care if you have 10,000 Goroutines running in the background. It doesn't wait for them to finish. It just turns off the lights, and every active Goroutine is instantly killed mid-sentence.
+
+A WaitGroup acts as a physical sign-in/sign-out sheet to prevent this.
+
+The 3 Commands of a WaitGroup :
+
+A WaitGroup is literally just an integer counter that is safe to use across multiple threads. It has exactly three methods:
+* **_`wg.Add(1)` (The Sign-In)_**: You call this before you launch a Goroutine. It tells the counter, "I am hiring 1 worker. The count is now 1."
+
+* **_`wg.Done()` (The Sign-Out)_**: The worker calls this right before it dies (usually using defer `wg.Done()`). It tells the counter, "I am going home." It is just a shortcut for wg.Add(-1).
+
+* **_`wg.Wait()` (The locked door)_**: This acts as a brick wall in your code. Whichever Goroutine calls `wg.Wait()` will freeze in place and cannot move to the next line of code until the internal counter hits exactly 0.
+
+In our pipeline, the Monitor Goroutine hits `wg.Wait()` and freezes. It is physically blocked from running `close(results)`. As the 8 workers finish the file, they call `wg.Done()`. The counter goes 8... 7... 6... down to 0. The exact nanosecond it hits 0, the brick wall vanishes, the Monitor steps forward, and safely closes the channel.
+
+## Generated 10 million log files
+```bash
+awk 'BEGIN { for(i=1; i<=10000000; i++) printf "GET /api/data %d\n", 200 + (i % 5) * 100 }' > server.log
+```
+
+![Pipeline Execution Time](assets/benchmark.png)
