@@ -84,7 +84,7 @@ Yes it is a log of transactions but it is for system level recovery and consiste
 
 ## Project Structure
 ```
-ledger-engine/
+doubleLedger/
 ├── cmd/
 │   └── api/
 │       └── main.go       # The absolute entry point. Only wires things up.
@@ -109,6 +109,7 @@ To build this, we need three tables.
 CREATE TABLE accounts (
     id UUID PRIMARY KEY,
     name VARCHAR(100) NOT NULL,
+    cached_balance BIGINT NOT NULL DEFAULT 0,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
@@ -225,4 +226,10 @@ FOR EACH ROW EXECUTE FUNCTION check_balance();
 -- "Hey, I'm about to do a bunch of inserts. Keep your eyes closed until I yell COMMIT. Then you can check my math."
 ```
 
-## Transfer Alogrithm
+## Transfer Alogrithm  
+* **The Deterministic Sort**: We take the Sender ID and Receiver ID and sort them alphabetically. This guarantees that if Amit pays Priya, and Priya pays Amit at the exact same millisecond, both Goroutines lock the accounts in the exact same order (Amit first, then Priya). Zero deadlocks.
+* **The Safety Net (defer Rollback)**: The absolute first line after opening a transaction is setting up a deferred rollback. If the Go code panics, crashes, or returns an error at any point, the transaction instantly aborts.
+* **The Pessimistic Locks**: We execute `SELECT balance ... FOR UPDATE` on the sorted accounts. The Goroutines form an orderly queue at the database level.
+* **The Balance Check**: We verify the sender has enough funds. (We calculate the balance from the ledger, or in a hybrid system, read a cached balance).
+* **The Append & Commit**: We insert the envelope into transactions, insert the two lines into `ledger_entries`, and call `COMMIT`. The database runs the deferred zero-sum trigger, and if it passes, the money moves permanently.
+
