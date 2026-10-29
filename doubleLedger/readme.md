@@ -82,3 +82,147 @@ If the database crashes right then, the history is gone. You have no idea whose 
 
 Yes it is a log of transactions but it is for system level recovery and consistency , It cannot be queried for a user , it store transactions ids without binding the imporatant metadata like sender,receiver important for business 
 
+## Project Structure
+```
+ledger-engine/
+├── cmd/
+│   └── api/
+│       └── main.go       # The absolute entry point. Only wires things up.
+├── internal/
+│   ├── db/               # Database connection and SQL execution logic
+│   ├── handler/          # HTTP API endpoints (request/response parsing)
+│   └── service/          # Core business logic (the ledger rules)
+├── migrations/           # Your SQL files go here
+├── go.mod
+└── go.sum
+```
+
+## Ledger Database Schema
+
+To build this, we need three tables.
+1. `accounts`: To store the UUIDs of the users.
+2. `transactions`: The envelope that groups our ledger lines together.
+3. `ledger_entries`: The actual append-only lines (the debits and credits).
+
+```sql
+-- 1. The Entities
+CREATE TABLE accounts (
+    id UUID PRIMARY KEY,
+    name VARCHAR(100) NOT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+-- 2. The Envelope
+CREATE TABLE transactions (
+    id UUID PRIMARY KEY,
+    reference VARCHAR(255) UNIQUE, -- Used for Idempotency later
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+-- 3. The Immutable Log
+CREATE TABLE ledger_entries (
+    id UUID PRIMARY KEY,
+    transaction_id UUID REFERENCES transactions(id),
+    account_id UUID REFERENCES accounts(id),
+    amount BIGINT NOT NULL, -- Positive for Credit, Negative for Debit
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+```
+> **Why no balance field in account?**  
+> *Because with double ledger systems balance is not a field, it is a calculated state, for large number of users the balance is cached*
+
+>**What is UUID?**  
+>
+>UUID stands for Universally Unique Identifier. Instead of relying on PostgreSQL to generate sequential IDs (like 1, 2, 3), a UUID is a massive 128-bit random alphanumeric string (e.g., 550e8400-e29b-41d4-a716-446655440000).
+>We use UUIDs in backend systems for two massive reasons:
+>* `Pre-generation`: Your Go code can generate the ID locally before it even talks to the database. This is required for Idempotency 
+>* `Distributed scaling`: If your startup grows and you split your database across three different servers, auto-incrementing IDs will collide (Server A creates ID 100, Server B creates ID 100). A UUID is so mathematically random that you can generate trillions of them across multiple servers without ever getting a duplicate.  
+
+>**Why no `from_account` and `to_account` in `ledger_entries`?**
+
+If you add from_account and to_account to a transaction, you are hardcoding the assumption that every financial movement only involves exactly two parties.  
+What happens when Amit orders a ₹500 meal on Swiggy, and Swiggy charges a ₹50 delivery fee and a ₹10 platform fee?  
+If you are locked into from and to, you have to create three separate fake transactions.  
+By structuring the ledger_entries table with just an account_id and an amount, a single transaction can have limitless "legs."  
+For that Swiggy order, under a single transaction_id, you just append four rows:  
+Row 1: [Amit's Wallet, -560]  
+Row 2: [Restaurant Escrow, +500]  
+Row 3: [Driver Escrow, +50]  
+Row 4: [Swiggy Revenue, +10]  
+
+The database constraint simply verifies that -560 + 500 + 50 + 10 = 0. This structure allows you to model infinitely complex financial splits (taxes, commissions, multi-vendor payouts) without altering your schema. 
+
+>**What is Idempotency?**  
+
+Imagine Amit is on a train with a spotty 4G connection. He taps "Pay". The request hits your Go server, the database deducts ₹500, but right before your server sends the "Success" message back, Amit's train enters a tunnel. 
+
+Amit's app times out. He thinks the payment failed, so he taps "Pay" again.  
+
+If your system is dumb, it processes the new request and deducts another ₹500.  
+
+**Idempotency is the architectural guarantee that making the same request multiple times produces the exact same result as making it once.**  
+
+To achieve this, Amit's mobile app generates a UUID when he hits the checkout screen (this is the reference field in our transactions table).  
+* **Attempt 1**: Go server receives `Ref: A1B2`, checks the database, sees it is new, and processes the transfer.  
+* **Attempt 2**: Go server receives `Ref: A1B2`, asks PostgreSQL to insert it. Because we added a `UNIQUE` constraint on the reference column, PostgreSQL violently rejects it. Your Go server catches that specific error, realizes Amit is retrying, and simply returns "Payment Successful" without touching his balance again.
+Now we had to test the concurreny and will hit many API requests at once, doing this on free cloud tier would not help us to experiment as free tiers have API rate limits  
+We use **Podman** to intialize a container,on same device so that we can hit as many requets as we want(bounded by laptop hardware)
+
+## What exactly Podman do?
+* It creats a child process of the terminal session where it was executed, it standalone process with assigned PCB and system resources , what makes it a container is cgroups and namespaces , which restricts it usage of the resoruces and tricks the application into thinking that it is running on a new fresh device
+* We assign a port in the container to list for the database requests
+>When you run a command with a port mapping (like -p 5432:5432), you are telling your laptop's OS:
+>*Open port 5432 on my actual laptop. If any requests arrive here, instantly forward them through the virtual network bridge directly into the >container's isolated network on its port 5432.*  
+* You aren't sending requests to a "podURL"—you are just talking to localhost:5432 on your laptop, and the OS handles routing it into the container's straightjacket.
+
+### Why a connection string to talk to container?
+it acts as an instruction manual for your application (like a Python or Node.js script) so it knows exactly what to write inside those packets before sending them.
+Here is what the connection string provides that raw packets lack:
+* `Authentication (The ID Card)`: A database will not accept anonymous network traffic. The connection string packages your username and password so the very first packets sent prove you have the right to be there.
+* `Context (The Specific Room)`: A single PostgreSQL container can host hundreds of entirely different databases. The connection string specifies exactly which one you want (e.g., `dbname=ecommerce_db`), so the server knows where to route your query.
+* `The Language (The Wire Protocol)`: You cannot just send plain text like "Give me the user table" over the network. Every database has its own highly specific binary language (*PostgreSQL uses the Postgres Wire Protocol*). By specifying `postgresql://` at the start of the string, you are telling your application's database driver to translate your SQL commands into that exact binary format.  
+
+Without the connection string, you are just blindly knocking on a door. With it, you are handing over a formatted, authenticated request that the database actually understands.
+```http
+postgresql://user:pass@localhost:5432/ecommerce_db
+```
+The credentials we set are for the admin of the database of the postgresql, so they are authenticated before touching the database  
+
+## What is a Trigger?  
+
+A trigger is an automated booby trap or a "bouncer" that lives permanently inside the database. You configure it to "listen" for specific events—usually an `INSERT`, `UPDATE`, or `DELETE` on a specific table.  
+When that event happens, the database automatically pauses the operation, executes a custom function, and decides whether to let the operation proceed, alter it, or violently reject it.  
+The industry standard is to use triggers strictly for data defense. You use them as advanced constraints. The Go application should still handle the business logic, but the trigger sits at the bottom like a concrete floor, ensuring that if the Go code makes a mathematical mistake, the database rejects the corrupted data.
+
+```sql
+-- the function
+CREATE OR REPLACE FUNCTION check_balance() 
+RETURNS TRIGGER AS $$
+DECLARE
+    total BIGINT;
+BEGIN
+    -- 'NEW' is a magic variable containing the row you are currently inserting
+    SELECT SUM(amount) INTO total 
+    FROM ledger_entries 
+    WHERE transaction_id = NEW.transaction_id;
+
+    IF total != 0 THEN
+        -- This acts like a 'panic' in Go. It kills the whole SQL transaction.
+        RAISE EXCEPTION 'Transaction % does not balance.', NEW.transaction_id;
+    END IF;
+
+    -- If the math is fine, let the row be inserted.
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+-- the trigger
+CREATE CONSTRAINT TRIGGER ensure_balance
+AFTER INSERT ON ledger_entries
+DEFERRABLE INITIALLY DEFERRED
+FOR EACH ROW EXECUTE FUNCTION check_balance();
+-- By making it "Deferred", you are telling the database bouncer: 
+-- "Hey, I'm about to do a bunch of inserts. Keep your eyes closed until I yell COMMIT. Then you can check my math."
+```
+
+## Transfer Alogrithm
