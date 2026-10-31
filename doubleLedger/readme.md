@@ -102,7 +102,7 @@ doubleLedger/
 To build this, we need three tables.
 1. `accounts`: To store the UUIDs of the users.
 2. `transactions`: The envelope that groups our ledger lines together.
-3. `ledger_entries`: The actual append-only lines (the debits and credits).
+3. `ledger`: The actual append-only lines (the debits and credits).
 
 ```sql
 -- 1. The Entities
@@ -121,7 +121,7 @@ CREATE TABLE transactions (
 );
 
 -- 3. The Immutable Log
-CREATE TABLE ledger_entries (
+CREATE TABLE ledger (
     id UUID PRIMARY KEY,
     transaction_id UUID REFERENCES transactions(id),
     account_id UUID REFERENCES accounts(id),
@@ -139,12 +139,12 @@ CREATE TABLE ledger_entries (
 >* `Pre-generation`: Your Go code can generate the ID locally before it even talks to the database. This is required for Idempotency 
 >* `Distributed scaling`: If your startup grows and you split your database across three different servers, auto-incrementing IDs will collide (Server A creates ID 100, Server B creates ID 100). A UUID is so mathematically random that you can generate trillions of them across multiple servers without ever getting a duplicate.  
 
->**Why no `from_account` and `to_account` in `ledger_entries`?**
+>**Why no `from_account` and `to_account` in `ledger`?**
 
 If you add from_account and to_account to a transaction, you are hardcoding the assumption that every financial movement only involves exactly two parties.  
 What happens when Amit orders a ₹500 meal on Swiggy, and Swiggy charges a ₹50 delivery fee and a ₹10 platform fee?  
 If you are locked into from and to, you have to create three separate fake transactions.  
-By structuring the ledger_entries table with just an account_id and an amount, a single transaction can have limitless "legs."  
+By structuring the `ledger` table with just an account_id and an amount, a single transaction can have limitless "legs."  
 For that Swiggy order, under a single transaction_id, you just append four rows:  
 Row 1: [Amit's Wallet, -560]  
 Row 2: [Restaurant Escrow, +500]  
@@ -204,7 +204,7 @@ DECLARE
 BEGIN
     -- 'NEW' is a magic variable containing the row you are currently inserting
     SELECT SUM(amount) INTO total 
-    FROM ledger_entries 
+    FROM ledger
     WHERE transaction_id = NEW.transaction_id;
 
     IF total != 0 THEN
@@ -219,7 +219,7 @@ $$ LANGUAGE plpgsql;
 
 -- the trigger
 CREATE CONSTRAINT TRIGGER ensure_balance
-AFTER INSERT ON ledger_entries
+AFTER INSERT ON ledger
 DEFERRABLE INITIALLY DEFERRED
 FOR EACH ROW EXECUTE FUNCTION check_balance();
 -- By making it "Deferred", you are telling the database bouncer: 
@@ -231,5 +231,56 @@ FOR EACH ROW EXECUTE FUNCTION check_balance();
 * **The Safety Net (defer Rollback)**: The absolute first line after opening a transaction is setting up a deferred rollback. If the Go code panics, crashes, or returns an error at any point, the transaction instantly aborts.
 * **The Pessimistic Locks**: We execute `SELECT balance ... FOR UPDATE` on the sorted accounts. The Goroutines form an orderly queue at the database level.
 * **The Balance Check**: We verify the sender has enough funds. (We calculate the balance from the ledger, or in a hybrid system, read a cached balance).
-* **The Append & Commit**: We insert the envelope into transactions, insert the two lines into `ledger_entries`, and call `COMMIT`. The database runs the deferred zero-sum trigger, and if it passes, the money moves permanently.
+* **The Append & Commit**: We insert the envelope into transactions, insert the two lines into `ledger`, and call `COMMIT`. The database runs the deferred zero-sum trigger, and if it passes, the money moves permanently.
 
+* This algorithm is applied in `internal/service/main.go`
+* The logging of the events is done directly on terminal
+
+## How to Run the Ledger Engine (Demo Setup)
+Prerequisites:
+Ensure Podman (or Docker) and Go are installed.
+
+**1. Start the PostgreSQL Container**
+Spin up the database in the background with the exact credentials the Go engine expects:
+```bash
+podman run --name ledger-db -e POSTGRES_USER=postgres -e POSTGRES_PASSWORD=secret -e POSTGRES_DB=ledger -p 5432:5432 -d postgres:15
+```
+**2. Load the Database Schema and Triggers**
+Inject the table structures first, followed by the deferred constraint triggers, into the running container:
+
+```Bash
+podman exec -i ledger-db psql -U postgres -d ledger < schema.sql
+podman exec -i ledger-db psql -U postgres -d ledger < trigger.sql
+```
+**3. Boot the API Server (Terminal 1)**
+Start the Go engine. The output is piped through jq to parse the JSON lines into a clean, readable stream while filtering out standard system noise:
+
+```Bash
+go run cmd/api/main.go 2>&1 | jq -R -c 'fromjson? | {msg: .msg, amount: .amount, error: .error, from: .from_account}'
+```
+4. Fire the Attack Simulator (Terminal 2)
+Open a second terminal window and run the stress test. This automatically connects to the database, seeds test accounts with ₹50,000, and attacks the API with over 200 concurrent requests (including valid cross-fire, massive overdrafts, and missing idempotency keys):
+
+```Bash
+go run cmd/simulator/main.go
+```
+5. Verify the Ledger (Database Shell)
+When the simulation is done, drop into the database shell to prove the final transactions and perfect double-entry math physically wrote to disk:
+
+```Bash
+podman exec -it ledger-db psql -U postgres -d ledger
+```
+*Try running these verification queries:*
+
+* `SELECT name, cached_balance FROM accounts;`
+
+* `SELECT count(*) FROM transactions;`
+
+* `SELECT transaction_id, amount, created_at FROM ledger ORDER BY created_at DESC LIMIT 6;`
+
+**6. Cleanup**
+Stop and remove the container when you are finished:
+
+```Bash
+podman rm -f ledger-db
+```
