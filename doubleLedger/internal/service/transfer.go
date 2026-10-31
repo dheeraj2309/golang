@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"uuid"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -11,25 +12,36 @@ import (
 
 type LedgerService struct {
 	db *pgxpool.Pool
+	logger *slog.Logger
 }
 
-func NewLedgerService(pool *pgxpool.Pool) *LedgerService {
+func NewLedgerService(pool *pgxpool.Pool,logger *slog.Logger) *LedgerService {
 	return &LedgerService{
 		db: pool,
+		logger: logger,
 	}
 
 }
 func (s *LedgerService) TransferFunds(ctx context.Context, fromAccountID, toAccountID uuid.UUID, amount int64) error {
+	log := s.logger.With(
+		slog.String("from_account", fromAccountID.String()),
+		slog.String("to_account", toAccountID.String()),
+		slog.Int64("amount", amount),
+	)
+	log.Info("initiating funds transfer")
 	if amount <= 0 {
+		log.Warn("rejected: invalid amount")
 		return errors.New("transfer amount must be strictly positive")
 	}
 	if fromAccountID == toAccountID {
+		log.Warn("rejected: self transfer attempted")
 		return errors.New("cannot transfer to the same account")
 	}
 	// 1. The Transaction Block
 	// We use an explicit transaction block so everything succeeds or fails together
 	tx, err := s.db.Begin(ctx)
 	if err != nil {
+		log.Error("failed to open database transaction", "error", err)
 		return fmt.Errorf("failed to begin transaction: %w", err)
 	}
 	defer tx.Rollback(ctx)
@@ -43,10 +55,12 @@ func (s *LedgerService) TransferFunds(ctx context.Context, fromAccountID, toAcco
 	var firstBal, secondBal int64
 	err = tx.QueryRow(ctx, "SELECT cached_balance FROM accounts WHERE id = $1 FOR UPDATE", firstID).Scan(&firstBal)
 	if err != nil {
+		log.Error("failed to lock first account", "error", err, "account_id", firstID)
 		return fmt.Errorf("failed to lock first account: %w", err)
 	}
 	err = tx.QueryRow(ctx, "SELECT cached_balance FROM accounts WHERE id = $1 FOR UPDATE", secondID).Scan(&secondBal)
 	if err != nil {
+		log.Error("failed to lock second account", "error", err, "account_id", secondID)
 		return fmt.Errorf("failed to lock second account: %w", err)
 	}
 
@@ -65,6 +79,7 @@ func (s *LedgerService) TransferFunds(ctx context.Context, fromAccountID, toAcco
 	// Create the envelope
 	_, err = tx.Exec(ctx, "INSERT into transactions (id,reference) VALUES ($1,$2)", transactionID, uuid.New().String())
 	if err != nil {
+		
 		return fmt.Errorf("failed to create transaction envelope: %w", err)
 	}
 	// Insert the Debit (-amount)
@@ -88,9 +103,10 @@ func (s *LedgerService) TransferFunds(ctx context.Context, fromAccountID, toAcco
 	}
 	// 6. The Commit (The Database Bouncer wakes up here)
 	if err := tx.Commit(ctx); err != nil {
+		log.Error("transaction commit failed (trigger violation)", "error", err)
 		return fmt.Errorf("transaction commit failed (trigger might have caught a zero-sum violation): %w", err)
 	}
-
+	log.Info("transfer committed successfully", "transaction_id", transactionID.String())
 	return nil
 
 }

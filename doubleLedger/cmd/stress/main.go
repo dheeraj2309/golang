@@ -5,6 +5,8 @@ import (
 	"doubleLedger/internal/service"
 	"fmt"
 	"log"
+	"log/slog"
+	"os"
 	"sync"
 	"time"
 	"uuid"
@@ -39,14 +41,17 @@ func verifyBalances(ctx context.Context, pool *pgxpool.Pool, user1ID, user2ID uu
 }
 
 func main() {
+	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 	ctx := context.Background()
+	logger.Info("booting ledger API", "env", "development")
 	dbURL := "postgres://postgres:1234@localhost:5432/ledger?sslmode=disable"
 	pool, err := pgxpool.New(ctx, dbURL)
 	if err != nil {
+		logger.Error("unable to connect to database", "error", err)
 		log.Fatalf("Failed to connect: %v", err)
 	}
 	defer pool.Close()
-	ledger := service.NewLedgerService(pool)
+	ledger := service.NewLedgerService(pool,logger)
 
 	user1ID, user2ID := uuid.New(), uuid.New()
 	setupAccounts(ctx, pool, user1ID, user2ID)
@@ -67,7 +72,7 @@ func main() {
 			}
 		}()
 	}
-	// Fire 250 Goroutines: Priya -> Amit
+	// Fire 250 Goroutines: user2 -> user1
 	for i := 0; i < 250; i++ {
 		wg.Add(1)
 		go func() {
